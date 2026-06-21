@@ -1,25 +1,35 @@
 import { z } from "zod";
 import { createRouter, publicQuery } from "../middleware";
 import { getDb } from "../queries/connection";
-import { submissions, formConfigs } from "../../db/schema";
-import { eq, desc } from "drizzle-orm";
+import type { Timestamp } from "firebase-admin/firestore";
+
+export type Submission = {
+  id: string;
+  formConfigId: string;
+  personName: string;
+  answers: Record<string, { value: string | number; label: string }>;
+  status: string;
+  errorMessage?: string;
+  createdAt: Timestamp | null;
+};
 
 export const submissionRouter = createRouter({
   listByForm: publicQuery
-    .input(z.object({ formConfigId: z.number() }))
+    .input(z.object({ formConfigId: z.string() }))
     .query(async ({ input }) => {
       const db = getDb();
-      return db
-        .select()
-        .from(submissions)
-        .where(eq(submissions.formConfigId, input.formConfigId))
-        .orderBy(desc(submissions.createdAt));
+      const snapshot = await db
+        .collection("submissions")
+        .where("formConfigId", "==", input.formConfigId)
+        .orderBy("createdAt", "desc")
+        .get();
+      return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() } as Submission));
     }),
 
   submitBatch: publicQuery
     .input(
       z.object({
-        formConfigId: z.number(),
+        formConfigId: z.string(),
         names: z.array(z.string()),
         ratingRange: z.object({
           min: z.number().min(1).max(5),
@@ -29,17 +39,13 @@ export const submissionRouter = createRouter({
     )
     .mutation(async ({ input }) => {
       const db = getDb();
-      const configs = await db
-        .select()
-        .from(formConfigs)
-        .where(eq(formConfigs.id, input.formConfigId))
-        .limit(1);
+      const configDoc = await db.collection("formConfigs").doc(input.formConfigId).get();
 
-      if (!configs[0]) {
+      if (!configDoc.exists) {
         throw new Error("Form config not found");
       }
 
-      const config = configs[0];
+      const config = configDoc.data()!;
       const entries = config.formEntries as Array<{
         entryId: string;
         type: string;
@@ -51,7 +57,6 @@ export const submissionRouter = createRouter({
       }>;
 
       const nameEntry = entries.find((e) => e.type === "name");
-
       const results = [];
 
       for (const name of input.names) {
@@ -73,50 +78,36 @@ export const submissionRouter = createRouter({
         }
 
         try {
-          const submitUrl = config.formUrl.replace(
-            /\/viewform.*$/,
-            "/formResponse"
-          );
+          const submitUrl = config.formUrl.replace(/\/viewform.*$/, "/formResponse");
 
           await fetch(submitUrl, {
             method: "POST",
             body: formData,
-            headers: {
-              "Content-Type": "application/x-www-form-urlencoded",
-            },
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
           });
 
-          const result = await db.insert(submissions).values({
+          const ref = await db.collection("submissions").add({
             formConfigId: input.formConfigId,
             personName: name,
             answers,
             status: "success",
+            createdAt: new Date(),
           });
 
-          results.push({
-            name,
-            status: "success",
-            answers,
-            id: Number(result[0].insertId),
-          });
+          results.push({ name, status: "success", answers, id: ref.id });
         } catch (error) {
-          const errorMsg =
-            error instanceof Error ? error.message : "Unknown error";
+          const errorMsg = error instanceof Error ? error.message : "Unknown error";
 
-          const result = await db.insert(submissions).values({
+          const ref = await db.collection("submissions").add({
             formConfigId: input.formConfigId,
             personName: name,
             answers,
             status: "failed",
             errorMessage: errorMsg,
+            createdAt: new Date(),
           });
 
-          results.push({
-            name,
-            status: "failed",
-            error: errorMsg,
-            id: Number(result[0].insertId),
-          });
+          results.push({ name, status: "failed", error: errorMsg, id: ref.id });
         }
       }
 
@@ -124,12 +115,18 @@ export const submissionRouter = createRouter({
     }),
 
   deleteByForm: publicQuery
-    .input(z.object({ formConfigId: z.number() }))
+    .input(z.object({ formConfigId: z.string() }))
     .mutation(async ({ input }) => {
       const db = getDb();
-      await db
-        .delete(submissions)
-        .where(eq(submissions.formConfigId, input.formConfigId));
+      const snapshot = await db
+        .collection("submissions")
+        .where("formConfigId", "==", input.formConfigId)
+        .get();
+
+      const batch = db.batch();
+      snapshot.docs.forEach((doc) => batch.delete(doc.ref));
+      await batch.commit();
+
       return { success: true };
     }),
 });

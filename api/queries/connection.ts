@@ -1,18 +1,20 @@
-import { drizzle } from "drizzle-orm/mysql2";
+import { initializeApp, getApps, cert } from "firebase-admin/app";
+import { getFirestore } from "firebase-admin/firestore";
 import { env } from "../lib/env";
-import * as schema from "../../db/schema";
-import * as relations from "../../db/relations";
 
-const fullSchema = { ...schema, ...relations };
-
-let instance: ReturnType<typeof drizzle<typeof fullSchema>>;
-
-export function getDb() {
-  if (!instance) {
-    instance = drizzle(env.databaseUrl, {
-      mode: "planetscale",
-      schema: fullSchema,
+function initFirebase() {
+  if (getApps().length === 0) {
+    initializeApp({
+      credential: cert({
+        projectId: env.firebase.projectId,
+        clientEmail: env.firebase.clientEmail,
+        privateKey: env.firebase.privateKey,
+      }),
     });
   }
-  return instance;
+  return getFirestore();
+}
+
+export function getDb() {
+  return initFirebase();
 }

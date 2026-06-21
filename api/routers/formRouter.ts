@@ -1,25 +1,34 @@
 import { z } from "zod";
 import { createRouter, publicQuery } from "../middleware";
 import { getDb } from "../queries/connection";
-import { formConfigs } from "../../db/schema";
-import { eq, desc } from "drizzle-orm";
+import type { Timestamp } from "firebase-admin/firestore";
+
+export type FormConfig = {
+  id: string;
+  name: string;
+  formUrl: string;
+  formEntries: Array<{ entryId: string; type: string; label: string }>;
+  questions: Array<{ label: string; entryId: string }>;
+  createdAt: Timestamp | null;
+};
 
 export const formRouter = createRouter({
   list: publicQuery.query(async () => {
     const db = getDb();
-    return db.select().from(formConfigs).orderBy(desc(formConfigs.createdAt));
+    const snapshot = await db
+      .collection("formConfigs")
+      .orderBy("createdAt", "desc")
+      .get();
+    return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() } as FormConfig));
   }),
 
   getById: publicQuery
-    .input(z.object({ id: z.number() }))
+    .input(z.object({ id: z.string() }))
     .query(async ({ input }) => {
       const db = getDb();
-      const results = await db
-        .select()
-        .from(formConfigs)
-        .where(eq(formConfigs.id, input.id))
-        .limit(1);
-      return results[0] ?? null;
+      const doc = await db.collection("formConfigs").doc(input.id).get();
+      if (!doc.exists) return null;
+      return { id: doc.id, ...doc.data() } as FormConfig;
     }),
 
   create: publicQuery
@@ -44,20 +53,21 @@ export const formRouter = createRouter({
     )
     .mutation(async ({ input }) => {
       const db = getDb();
-      const result = await db.insert(formConfigs).values({
+      const ref = await db.collection("formConfigs").add({
         name: input.name,
         formUrl: input.formUrl,
         formEntries: input.formEntries,
         questions: input.questions,
+        createdAt: new Date(),
       });
-      return { id: Number(result[0].insertId) };
+      return { id: ref.id };
     }),
 
   delete: publicQuery
-    .input(z.object({ id: z.number() }))
+    .input(z.object({ id: z.string() }))
     .mutation(async ({ input }) => {
       const db = getDb();
-      await db.delete(formConfigs).where(eq(formConfigs.id, input.id));
+      await db.collection("formConfigs").doc(input.id).delete();
       return { success: true };
     }),
 });
